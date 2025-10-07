@@ -6,6 +6,8 @@ import wave
 import struct
 from queue import Queue
 
+from datetime import datetime
+
 import numpy as np
 import serial
 from serial.tools import list_ports
@@ -64,8 +66,28 @@ def ensure_csv(csv_path: str):
             ])
 
 
+def ensure_fast_csv(csv_path: str):
+    need_header = not os.path.exists(csv_path)
+    if need_header:
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            csv.writer(f).writerow([
+                'ts', 'chunk_index', 'wav', 'fs', 'nsamples', 'peak', 'rms', 'crest', 'zcr',
+                'duration_ms', 'centroid_hz', 'rolloff85_hz', 'bandwidth_hz', 'dominant_hz'
+            ])
+
+
 class SerialWorker(threading.Thread):
-    def __init__(self, port: str, baud: int, outdir: str, frame_q: Queue, event_info_q: Queue, stop_event: threading.Event):
+    def __init__(
+        self,
+        port: str,
+        baud: int,
+        outdir: str,
+        frame_q: Queue,
+        event_info_q: Queue,
+        stop_event: threading.Event,
+        chunk_rate_hz: float,
+    ):
         super().__init__(daemon=True)
         self.port = port
         self.baud = baud
@@ -76,6 +98,23 @@ class SerialWorker(threading.Thread):
         self.ser = None
         os.makedirs(self.outdir, exist_ok=True)
         ensure_csv(os.path.join(self.outdir, 'features.csv'))
+        try:
+            self.chunk_rate_hz = float(chunk_rate_hz)
+        except (TypeError, ValueError):
+            self.chunk_rate_hz = 0.0
+        if self.chunk_rate_hz > 0.0:
+            self.fast_dir = os.path.join(self.outdir, 'fast_chunks')
+            os.makedirs(self.fast_dir, exist_ok=True)
+            self.fast_csv_path = os.path.join(self.outdir, 'fast_features.csv')
+            ensure_fast_csv(self.fast_csv_path)
+        else:
+            self.fast_dir = None
+            self.fast_csv_path = None
+        self.chunk_fs = None
+        self.chunk_samples = 0
+        self.chunk_tail = np.empty(0, dtype=np.int16)
+        self.chunk_counter = 0
+        self.chunk_status_t0 = time.time()
 
     def run(self):
         try:
@@ -85,7 +124,9 @@ class SerialWorker(threading.Thread):
             return
 
         buf = b''
+
         self.event_info_q.put(("status", f"已連線 {self.port} @ {self.baud}"))
+
         while not self.stop_event.is_set():
             try:
                 chunk = self.ser.read(4096)
@@ -130,6 +171,7 @@ class SerialWorker(threading.Thread):
                         except Exception:
                             pass
                     self.frame_q.put((sr, frame))
+                    self.handle_fast_chunk(sr, frame)
                 elif tag == b'EVT0':
                     x = np.frombuffer(data, dtype=np.int16).copy()
                     ts = time.strftime('%Y%m%d_%H%M%S')
@@ -154,6 +196,44 @@ class SerialWorker(threading.Thread):
                 self.ser.close()
         except Exception:
             pass
+        self.event_info_q.put(("status", "�w����"))
+
+    def handle_fast_chunk(self, sr: int, frame: np.ndarray):
+        if self.fast_dir is None or self.chunk_rate_hz <= 0.0:
+            return
+        if self.chunk_fs != sr or self.chunk_samples <= 0:
+            self.chunk_fs = sr
+            samples = int(round(sr / self.chunk_rate_hz)) if self.chunk_rate_hz > 0 else 0
+            self.chunk_samples = max(1, samples)
+            self.chunk_tail = np.empty(0, dtype=np.int16)
+        data = frame if self.chunk_tail.size == 0 else np.concatenate((self.chunk_tail, frame))
+        produced = 0
+        chunk_samples = self.chunk_samples
+        while len(data) >= chunk_samples:
+            chunk = data[:chunk_samples].copy()
+            data = data[chunk_samples:]
+            self.chunk_counter += 1
+            ts_dt = datetime.now()
+            wav_name = f"fast_{ts_dt.strftime('%Y%m%d_%H%M%S_%f')}_{self.chunk_counter:06d}.wav"
+            wav_path = os.path.join(self.fast_dir, wav_name)
+            try:
+                save_wav(wav_path, chunk, sr)
+                feat = extract_features(chunk, sr)
+                row = [ts_dt.isoformat(), self.chunk_counter, wav_name, sr, len(chunk)] + list(feat)
+                with open(self.fast_csv_path, 'a', newline='', encoding='utf-8') as f:
+                    csv.writer(f).writerow(row)
+                produced += 1
+            except Exception as e:
+                self.event_info_q.put(("error", f"Fast chunk error: {e}"))
+                self.chunk_tail = np.empty(0, dtype=np.int16)
+                return
+        self.chunk_tail = data.copy()
+        now = time.time()
+        if produced and (now - self.chunk_status_t0) >= 1.0:
+            self.chunk_status_t0 = now
+            self.event_info_q.put(("status", f"Fast chunks saved: {self.chunk_counter}"))
+
+
         self.event_info_q.put(("status", "已停止"))
 
 
@@ -188,6 +268,11 @@ class ImpactMonitorApp:
         self.fmax_var = tk.StringVar(value="8000")
         self.fmax_entry = ttk.Entry(ctrl, textvariable=self.fmax_var, width=8)
         self.fmax_entry.pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(ctrl, text="Chunks/s:").pack(side=tk.LEFT, padx=(10, 0))
+        self.chunk_rate_var = tk.StringVar(value="10")
+        self.chunk_rate_entry = ttk.Entry(ctrl, textvariable=self.chunk_rate_var, width=6)
+        self.chunk_rate_entry.pack(side=tk.LEFT, padx=4)
 
         # Keep primary controls visible
         self.btn_start = ttk.Button(ctrl, text="Start", command=self.start)
@@ -351,6 +436,16 @@ class ImpactMonitorApp:
             messagebox.showwarning("提示", "Baud 需為數字")
             return
 
+        raw_chunk = (self.chunk_rate_var.get() or "").strip()
+        try:
+            chunk_rate = float(raw_chunk) if raw_chunk else 0.0
+        except ValueError:
+            messagebox.showwarning("提示", "Chunks/s 需為數字")
+            return
+        if chunk_rate < 0.0:
+            messagebox.showwarning("提示", "Chunks/s 不可為負值")
+            return
+
         # create session subfolder based on start time
         base_out = self.outdir_var.get().strip() or "events"
         session_name = time.strftime('%Y%m%d_%H%M%S')
@@ -358,13 +453,22 @@ class ImpactMonitorApp:
         os.makedirs(session_dir, exist_ok=True)
 
         self.stop_event.clear()
-        self.worker = SerialWorker(port, baud, session_dir, self.frame_q, self.event_info_q, self.stop_event)
+        self.worker = SerialWorker(
+            port,
+            baud,
+            session_dir,
+            self.frame_q,
+            self.event_info_q,
+            self.stop_event,
+            chunk_rate,
+        )
         self.worker.start()
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
         self.port_box.config(state='disabled')
         self.baud_entry.config(state='disabled')
         self.outdir_entry.config(state='disabled')
+        self.chunk_rate_entry.config(state='disabled')
         self.status_var.set(f"連線中... 儲存至 {session_dir}")
 
     def stop(self):
@@ -377,6 +481,7 @@ class ImpactMonitorApp:
         self.port_box.config(state='readonly')
         self.baud_entry.config(state='normal')
         self.outdir_entry.config(state='normal')
+        self.chunk_rate_entry.config(state='normal')
         self.status_var.set("未連線")
 
     def schedule_ui_update(self):
