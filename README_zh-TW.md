@@ -1,110 +1,261 @@
-# Impact Analysis / ImpactCapture（繁體中文）
+# ESP32 即時撞擊聲音分類系統
 
-本專案提供以 Python 開發的即時與離線工具，用於接收、可視化、與分析由 ESP32 韌體（`ImpactCapture.ino`）傳來的事件資料（EVT0/FRM0）。
+**20Hz 判斷頻率 | 本地邊緣推理 | 三階段進化架構**
 
-- 即時監看（GUI）：`impact_analysis/impact_monitor.py`
-- 命令列接收（CLI）：`impact_analysis/receive_events.py`
-- 單檔離線視覺化：`impact_analysis/visualize_event.py`
-- ESP32 韌體：`ImpactCapture/ImpactCapture.ino`
-- 事件輸出：`events/YYYYMMDD_HHMMSS/evt_*.wav`、`features.csv`
+本專案提供完整的撞擊聲音偵測與分類解決方案，從數據收集、模型訓練到嵌入式部署。
 
-## 特色
+## 系統架構
 
-- 即時擷取與繪圖：波形、頻譜、頻譜圖（spectrogram，dB 色階）
-- 儲存事件音檔（WAV）與特徵摘要（CSV）
-- 支援離線載入單一 WAV 做可視化
-- 簡潔 UI 操作（Start/Stop、檔案分析、F1/F11/Ctrl+Q 等）
+```
+[ESP32 + MAX9814] ──(921600 baud)──> [Python 工具]
+       │                                      │
+       ├─ 20Hz 本地判斷 (RMS/多特徵)         ├─ 即時可視化
+       ├─ RSLT 封包 (17 bytes, 0.15ms)      ├─ 數據收集
+       └─ EVT0 封包 (音訊 + 特徵)            └─ 模型訓練
+```
 
-## 目錄結構
+## 三階段進化路徑
 
-- `impact_analysis/impact_monitor.py`：Tkinter GUI，即時擷取/繪圖/檔案分析
-- `impact_analysis/receive_events.py`：命令列接收與（可選）即時繪圖
-- `impact_analysis/visualize_event.py`：單一 WAV 的離線視覺化
-- `impact_analysis/requirements.txt`：Python 依賴（NumPy、Matplotlib、PySerial 等）
-- `ImpactCapture/ImpactCapture.ino`：ESP32 韌體（輸出 EVT0/FRM0）
-- `events/`：工作階段輸出（例：`YYYYMMDD_HHMMSS/evt_*.wav`、`features.csv`）
+### 階段1：簡單閾值分類器（立即可用）
+- ESP32 每 50ms 計算 RMS，與閾值比較
+- 輸出判斷結果 (0/1) + 音訊數據
+- Python 即時監控與可視化
+- **適合：快速原型驗證、單一特徵足夠的場景**
 
-## 環境安裝
+### 階段2：數據驅動分類器（收集樣本後）
+- 使用階段1收集正負樣本
+- Python 訓練 Random Forest / SVM 模型
+- 找出最佳特徵組合與閾值
+- **適合：需要多特徵組合、有標註數據**
 
-- 建議 Python 3.10 以上
-- Windows PowerShell 範例：
+### 階段3：嵌入式機器學習（TinyML）
+- 將模型部署到 ESP32 本地推理
+- 支援決策樹、神經網路、Edge Impulse
+- 推理延遲 < 5ms，無需 Python 即可運行
+- **適合：複雜決策邊界、獨立運行需求**
 
+## 快速開始
+
+### 1. 硬體接線
+```
+MAX9814 → ESP32
+  VCC   → 3V3
+  GND   → GND
+  OUT   → GPIO34 (ADC1_CH6)
+```
+
+### 2. 燒錄韌體
+```bash
+# Arduino IDE
+1. 開啟 ImpactCapture/ImpactCapture.ino
+2. 選擇板子：ESP32 Dev Module
+3. 上傳速度：921600
+4. 上傳
+```
+
+### 3. 安裝 Python 環境
 ```bash
 python -m venv .venv
-. .venv/Scripts/activate
+.\.venv\Scripts\activate           # Windows
+source .venv/bin/activate          # macOS/Linux
 pip install -r impact_analysis/requirements.txt
 ```
 
-macOS/Linux 可改用 `source .venv/bin/activate` 啟用虛擬環境。
-
-## 使用方式
-
-### 1) 啟動 GUI 監看
-
+### 4. 啟動即時監控（階段1）
 ```bash
-python impact_analysis/impact_monitor.py
+python impact_analysis/real_time_classifier.py
 ```
 
-### 2) 命令列（無頭）接收與儲存
+介面功能：
+- 選擇序列埠、設定輸出資料夾
+- 即時顯示判斷結果 (0/1)、RMS 數值
+- 波形、FFT、頻譜圖可視化
+- 自動儲存 `results.csv`（所有判斷）和 `features.csv`（完整特徵）
 
-以 Windows 的 `COM5` 為例，並顯示即時繪圖、限制最高頻率 8 kHz：
-
+### 5. 收集訓練數據（階段2 準備）
 ```bash
-python impact_analysis/receive_events.py -p COM5 -o events --live --fmax 8000
+# 分別收集正樣本和負樣本
+# 正樣本：執行你想要偵測的撞擊動作
+mkdir -p events/positive_samples
+python impact_analysis/real_time_classifier.py
+# 輸出到 events/positive_samples/20250107_xxx/
+
+# 負樣本：執行其他不相關的聲音
+mkdir -p events/negative_samples
+python impact_analysis/real_time_classifier.py
+# 輸出到 events/negative_samples/20250107_xxx/
 ```
 
-- Windows 連接埠：`COMx`
-- macOS：`/dev/tty.usbserial*` 或 `/dev/tty.SLAB_USBtoUART`
-- Linux：`/dev/ttyUSB*` 或 `/dev/ttyACM*`
-
-### 3) 離線視覺化已儲存的 WAV
-
+### 6. 訓練分類器（階段2）
 ```bash
-python impact_analysis/visualize_event.py events/20250101_120000/evt_*.wav --fmax 8000
+python impact_analysis/train_classifier.py \
+  --positive events/positive_samples/20250107_*/ \
+  --negative events/negative_samples/20250107_*/ \
+  --model both \
+  --output models
 ```
 
-### 4) 燒錄與設定 ESP32 韌體
+輸出：
+- `models/random_forest.joblib`：隨機森林模型
+- `models/svm.joblib`：SVM 模型
+- `models/*_confusion_matrix.png`：混淆矩陣
+- `models/*_roc_curve.png`：ROC 曲線
+- 終端顯示：特徵重要性、最佳閾值
 
-- 使用 Arduino IDE 開啟 `ImpactCapture/ImpactCapture.ino`
-- 選擇正確的 ESP32 板子與序列埠，編譯並上傳
+### 7. 部署到 ESP32（階段3）
 
-## 輸出資料說明
+#### 方案 A：更新閾值（最簡單）
+```cpp
+// ImpactCapture.ino
+float THRESHOLD_RMS = 350.0f;  // 使用階段2找出的最佳值
+```
 
-- 事件目錄：`events/YYYYMMDD_HHMMSS/`
-  - 事件音檔：`evt_*.wav`
-  - 特徵摘要：`features.csv`
-- 建議定期清理舊的 `events/` 以節省磁碟空間
+#### 方案 B：多特徵規則
+```cpp
+// ImpactCapture.ino 啟用進階分類器
+uint8_t classify_advanced(float rms, float peak, float dominant_freq) {
+  if (rms > 350.0 && peak > 0.6 &&
+      dominant_freq > 2000 && dominant_freq < 5000) {
+    return 1;
+  }
+  return 0;
+}
+```
 
-## 開發與貢獻指南
+#### 方案 C：Edge Impulse（完整 TinyML）
+參考 [`STAGE3_DEPLOYMENT.md`](STAGE3_DEPLOYMENT.md) 詳細步驟。
 
-- 程式風格：PEP 8、四空白縮排、適度型別註記；函式/模組 `snake_case`，常數 `UPPER_SNAKE_CASE`
-- UI：次要操作放入選單（Help/Exit），簡潔標籤，快捷鍵一致（F1/F11/Ctrl+Q）
-- 繪圖：軸標題與標籤齊全；spectrogram 採 dB 色階並隨資料更新 colorbar
-- 測試：
-  - 無正式測試套件；新增純函式（如特徵）時，建議以 `pytest` 撰寫小型單元測試
-  - 大型樣本請勿加入版本控制
-- Commit：簡短祈使句標題（≤72 字元），必要時補充動機與關聯 issue
-- PR：聚焦單一議題，清楚描述、重現步驟、UI 變更附圖，標註所用序列埠與平台
+## 目錄結構
 
-## Git 與檔案忽略
+```
+.
+├── ImpactCapture/
+│   └── ImpactCapture.ino          # ESP32 韌體 (20Hz 分類器)
+├── impact_analysis/
+│   ├── real_time_classifier.py    # 階段1: 即時監控 GUI
+│   ├── train_classifier.py        # 階段2: 訓練分類器
+│   ├── visualize_event.py         # 離線視覺化工具
+│   └── requirements.txt           # Python 依賴
+├── events/                         # 數據收集輸出
+│   ├── positive_samples/
+│   │   └── 20250107_HHMMSS/
+│   │       ├── results.csv        # 所有判斷結果 (20Hz)
+│   │       ├── features.csv       # 完整特徵 (4Hz)
+│   │       └── chunk_*.wav        # 音訊檔案
+│   └── negative_samples/
+│       └── ...
+├── models/                         # 訓練好的模型
+│   ├── random_forest.joblib
+│   ├── svm.joblib
+│   └── *.png                      # 評估圖表
+├── STAGE3_DEPLOYMENT.md           # 階段3 詳細指南
+└── README_zh-TW.md                # 本文件
+```
 
-- 已建議忽略：
-  - `events/`（避免提交大量輸出）
-  - `AGENT.md`／`AGENTS.md`（若存在）
-- 若檔案已被追蹤：使用 `git rm --cached <path>` 後再提交
-- 若需「從歷史抹除」敏感檔案，可使用 `git filter-repo` 或 BFG，並強制推送
+## 序列協定說明
 
-## 安全與設定建議
+### RSLT 封包（判斷結果，每 50ms）
+```
+"RSLT" (4 bytes) +
+timestamp_ms (uint32_le, 4 bytes) +
+result (uint8, 1 byte) +          ← 0 或 1
+rms (float32_le, 4 bytes) +
+peak (float32_le, 4 bytes)
+= 17 bytes 總計
+```
 
-- 確認正確序列埠（例：Windows `COM5`，macOS `/dev/tty.usbserial*`）
-- 以 session 目錄（`events/YYYYMMDD_HHMMSS/`）管理輸出，定期清理
-- 燒錄前於 Arduino IDE 選擇正確的 ESP32 板型與埠口
+### EVT0 封包（完整音訊，每 250ms 或偵測到時）
+```
+"EVT0" (4 bytes) +
+sample_rate (uint32_le, 4 bytes) +
+sample_count (uint32_le, 4 bytes) +
+result (uint8, 1 byte) +          ← 對應的判斷結果
+int16_le[sample_count]            ← 音訊數據
+```
 
-## 常見問題（FAQ）
+## 性能指標
 
-- 啟動 GUI 後無資料？
-  - 檢查序列埠是否正確，ESP32 是否已上傳韌體並供電
-- 無法開啟序列埠／權限不足？
-  - macOS/Linux 需將使用者加入對應的 dialout/tty 群組或以管理員權限執行
-- 繪圖視窗不更新或閃爍？
-  - 確認已安裝 `matplotlib` 與相容的後端；降低刷新率或資料率亦可改善
+| 指標 | 數值 |
+|------|------|
+| 判斷頻率 | 20Hz (每 50ms) |
+| 判斷延遲 | < 2ms (ESP32 本地) |
+| RSLT 傳輸時間 | 0.15ms |
+| EVT0 傳輸時間 | 14ms (800 samples @ 921600 baud) |
+| 音訊取樣率 | 16 kHz |
+| 最高頻率分析 | 8 kHz (Nyquist) |
+
+## 調整參數
+
+### ESP32 韌體 (`ImpactCapture.ino`)
+```cpp
+#define CHUNK_MS 50                // 判斷週期 (50ms = 20Hz)
+#define SAMPLE_RATE 16000          // 取樣率
+float THRESHOLD_RMS = 300.0f;      // RMS 閾值
+#define SEND_AUDIO_EVERY_N 5       // 每 N 次送一次音訊 (5 = 4Hz)
+```
+
+### Python 動態調整閾值（進階）
+```python
+import serial
+import struct
+
+ser = serial.Serial('COM5', 921600)
+new_threshold = 350.0
+ser.write(b'T' + struct.pack('<f', new_threshold))
+```
+
+## 常見問題
+
+### Q: 判斷結果都是 0 或都是 1？
+A: 調整 `THRESHOLD_RMS`。執行階段1 收集數據後，檢視 `results.csv` 的 RMS 欄位，設定閾值在正負樣本之間。
+
+### Q: 如何提高判斷頻率到 50Hz (20ms)?
+A: 修改韌體 `#define CHUNK_MS 20`，但需注意串口傳輸時間可能不足，建議只送 RSLT 封包（註解掉 EVT0 傳送部分）。
+
+### Q: 可以使用其他 ADC 腳位嗎？
+A: 可以，但必須是 ADC1 通道（GPIO32-39）。修改韌體：
+```cpp
+#define ADC_CHANNEL ADC1_CHANNEL_4  // GPIO32
+```
+
+### Q: Edge Impulse 訓練失敗？
+A: 確保每個類別至少有 20 個樣本，且音訊長度一致（50ms = 800 samples）。
+
+### Q: 模型準確率不高怎麼辦？
+A:
+1. 收集更多樣本（每類至少 100 個）
+2. 確保正負樣本平衡
+3. 嘗試不同特徵組合（檢視特徵重要性）
+4. 使用更複雜的模型（階段3）
+
+## 進階功能
+
+### 多類別分類（3+ 類別）
+修改韌體輸出 `uint8_t` 範圍 0-N，Python 訓練多類別分類器。
+
+### 連續動作追蹤
+在韌體中加入狀態機，追蹤連續判斷結果：
+```cpp
+if (result == 1 && prev_result == 0) {
+  // 上升沿：開始動作
+}
+```
+
+### 資料庫儲存
+修改 Python 工具，將結果寫入 SQLite/PostgreSQL 而非 CSV。
+
+## 貢獻指南
+
+- 程式風格：PEP 8、四空白縮排
+- Commit：簡短祈使句（≤50 字元）
+- PR：聚焦單一功能，附上測試結果
+
+## 授權
+
+MIT License
+
+## 參考資源
+
+- [Edge Impulse 文檔](https://docs.edgeimpulse.com/)
+- [TensorFlow Lite Micro](https://www.tensorflow.org/lite/microcontrollers)
+- [ESP32 I2S-ADC 範例](https://github.com/espressif/esp-idf/tree/master/examples/peripherals/adc)

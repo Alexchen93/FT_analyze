@@ -655,24 +655,20 @@ class FileAnalysisWindow(tk.Toplevel):
 
         # Menubar similar to main window to reduce toolbar clutter
         menubar = tk.Menu(self)
-        # File menu
         m_file = tk.Menu(menubar, tearoff=0)
         m_file.add_command(label='Browse Base Dir...', command=self.browse_base_dir, accelerator='Ctrl+O')
         m_file.add_command(label='Refresh', command=self.refresh_tree, accelerator='F5')
         m_file.add_separator()
         m_file.add_command(label='Close', command=self.on_close, accelerator='Ctrl+W')
         menubar.add_cascade(label='File', menu=m_file)
-        # View menu
         m_view = tk.Menu(menubar, tearoff=0)
         m_view.add_command(label='Toggle Fullscreen', command=self.toggle_fullscreen, accelerator='F11')
         menubar.add_cascade(label='View', menu=m_view)
-        # Help menu
         m_help = tk.Menu(menubar, tearoff=0)
         m_help.add_command(label='Plot Help', command=self.show_help, accelerator='F1')
         menubar.add_cascade(label='Help', menu=m_help)
         self.config(menu=menubar)
 
-        # Key bindings
         self.is_fullscreen = False
         self.bind('<F11>', lambda e: self.toggle_fullscreen())
         self.bind('<Escape>', lambda e: self.exit_fullscreen())
@@ -683,7 +679,6 @@ class FileAnalysisWindow(tk.Toplevel):
         self.protocol('WM_DELETE_WINDOW', self.on_close)
 
         self.refresh_tree()
-        # Ensure the window fits the screen once laid out
         self.after(50, self._fit_to_screen)
 
     def browse_base_dir(self):
@@ -694,24 +689,11 @@ class FileAnalysisWindow(tk.Toplevel):
 
     def show_help(self):
         text = (
-            "、波形 (Waveform)\n\n"
-            "圖示內容：顯示訊號在時間上的變化（振幅隨時間的波動）。\n"
-            "分析方法：\n\n"
-            "從圖中可以看到在 0.10.25 秒之間能量最強，這代表訊號在這段時間內有主要活動。\n\n"
-            "波形能幫助我們初步判斷訊號持續時間、強弱變化，以及是否有突發的能量峰值。\n\n"
-            "2. 頻譜 (Magnitude Spectrum)\n\n"
-            "圖示內容：顯示訊號的整體頻率分布（頻率成分的強度）。\n\n"
-            "分析方法：\n\n"
-            "橫軸是頻率，縱軸是分貝 (dB)，表示各頻率成分的能量強弱。\n\n"
-            "從圖中可以看到訊號能量分布在 08000 Hz 範圍內，但某些頻率帶的能量更明顯。\n\n"
-            "這有助於判斷訊號是否包含低頻或高頻特徵，以及可能對應的聲音或現象。\n\n"
-            "3. 聲譜圖 (Spectrogram)\n\n"
-            "圖示內容：時間與頻率的能量分布（時頻分析）。\n\n"
-            "分析方法：\n\n"
-            "聲譜圖能同時看到訊號在不同時間點的頻率能量。\n\n"
-            "在 0.10.25 秒的區間，頻率範圍大約從 06000 Hz都有明顯能量，和波形的強能量區一致。"
+            "1. Waveform: Displays amplitude over time for the selected file.\n\n"
+            "2. Magnitude Spectrum: Shows frequency magnitudes in dB to reveal dominant bands.\n\n"
+            "3. Spectrogram: Visualizes energy over time and frequency to highlight transient events."
         )
-        messagebox.showinfo('圖表說明', text)
+        messagebox.showinfo('Plot Help', text)
 
     # Fullscreen helpers for analysis window
     def enter_fullscreen(self):
@@ -737,6 +719,11 @@ class FileAnalysisWindow(tk.Toplevel):
             self.exit_fullscreen()
         else:
             self.enter_fullscreen()
+
+    def on_close(self):
+        if getattr(self, 'is_fullscreen', False):
+            self.exit_fullscreen()
+        self.destroy()
 
     def _fit_to_screen(self):
         # Robust maximize across platforms
